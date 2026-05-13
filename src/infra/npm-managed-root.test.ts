@@ -386,6 +386,9 @@ describe("managed npm root", () => {
             "old-peer": "1.0.0",
             plugin: "1.0.0",
           },
+          devDependencies: {
+            "dev-plugin": "1.0.0",
+          },
           openclaw: {
             managedPeerDependencies: ["old-peer"],
           },
@@ -419,6 +422,17 @@ describe("managed npm root", () => {
                 dependencies: tempManifest.dependencies,
               },
               "node_modules/existing-root": {
+                version: "1.0.0",
+              },
+              "node_modules/dev-peer": {
+                dev: true,
+                version: "3.0.0",
+              },
+              "node_modules/dev-plugin": {
+                dev: true,
+                peerDependencies: {
+                  "dev-peer": "^3.0.0",
+                },
                 version: "1.0.0",
               },
               "node_modules/new-peer": {
@@ -474,6 +488,9 @@ describe("managed npm root", () => {
         "existing-root": "1.0.0",
         "new-peer": "2.1.0",
         plugin: "1.0.0",
+      },
+      devDependencies: {
+        "dev-plugin": "1.0.0",
       },
       openclaw: {
         managedPeerDependencies: ["new-peer"],
