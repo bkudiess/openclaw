@@ -138,6 +138,10 @@ function formatOAuthRefreshFailureReason(reason: OAuthRefreshFailureReason | nul
   switch (reason) {
     case "refresh_token_reused":
       return "refresh_token_reused";
+    case "refresh_token_expired":
+      return "refresh_token_expired";
+    case "refresh_token_invalidated":
+      return "refresh_token_invalidated";
     case "invalid_grant":
       return "invalid_grant";
     case "sign_in_again":
