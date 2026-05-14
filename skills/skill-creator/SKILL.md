@@ -64,7 +64,7 @@ skill-name/
 
 Every SKILL.md consists of:
 
-- **Frontmatter** (YAML): Contains `name` and `description` fields. These are the only fields that Codex reads to determine when the skill gets used, thus it is very important to be clear and comprehensive in describing what the skill is, and when it should be used.
+- **Frontmatter** (YAML): Contains the keys `name`, `description`, and optionally `license`, `allowed-tools`, and `metadata`. Only `name` and `description` drive triggering — Codex reads those to decide whether to load the skill — so they must be clear and comprehensive. `metadata.openclaw` is the OpenClaw extension surface for OS scoping, install recipes, and required binaries (see "Cross-platform skills" below).
 - **Body** (Markdown): Instructions and guidance for using the skill. Only loaded AFTER the skill triggers (if at all).
 
 #### Bundled Resources (optional)
@@ -198,6 +198,52 @@ Codex reads REDLINING.md or OOXML.md only when the user needs those features.
 - **Avoid deeply nested references** - Keep references one level deep from SKILL.md. All reference files should link directly from SKILL.md.
 - **Structure longer reference files** - For files longer than 100 lines, include a table of contents at the top so Codex can see the full scope when previewing.
 
+## Cross-platform skills
+
+Most tools that ship on more than one OS should be a **single multi-OS skill**, not one skill per OS. Fork-into-`<tool>-windows` / `<tool>-linux` only when the underlying app is genuinely OS-locked (e.g. `apple-notes`, `things-mac`, `imsg` — those apps don't exist off macOS).
+
+For multi-OS skills:
+
+- Declare `os` as an array in `metadata.openclaw`:
+  ```yaml
+  metadata:
+    openclaw:
+      os: ["darwin", "linux", "win32"]
+  ```
+- Gate each `install` entry by `os` so the installer picks the right path. Supported `kind:` values today: `brew`, `winget`, `cargo`, `go`, `download` (URL + archive + extract). Confirm the schema in `src/cli/plugins-command-helpers.ts` before introducing a new kind.
+  ```yaml
+  install:
+    - { id: "brew",   kind: "brew",   os: ["darwin","linux"], formula: "foo",          bins: ["foo"] }
+    - { id: "winget", kind: "winget", os: ["win32"],          packageId: "Vendor.Foo", bins: ["foo"] }
+    - { id: "cargo",  kind: "cargo",  os: ["darwin","linux","win32"], crate: "foo",    bins: ["foo"] }
+  ```
+- In the SKILL body, document each platform's **paths** and **install commands** explicitly. A small per-OS table beats prose:
+  | OS | Config dir |
+  |---|---|
+  | macOS | `~/Library/Application Support/<app>/` |
+  | Linux | `~/.config/<app>/` (or `$XDG_CONFIG_HOME/<app>/`) |
+  | Windows | `%APPDATA%\<app>\` |
+- In bundled `scripts/`, gate platform-specific logic on the runtime:
+  ```python
+  import sys
+  if sys.platform == "win32": ...
+  elif sys.platform == "darwin": ...
+  ```
+  ```powershell
+  if ($IsWindows) { ... } elseif ($IsMacOS) { ... }
+  ```
+  ```bash
+  case "$(uname -s)" in Darwin) ... ;; Linux) ... ;; MINGW*|MSYS*|CYGWIN*) ... ;; esac
+  ```
+- Use `anyBins` instead of `bins` in `requires` when the upstream tool ships under different binary names per OS or per channel (e.g. `obsidian-cli` on macOS / `notesmd-cli` on Windows after a rename). `bins` requires **all** listed binaries to resolve on PATH; `anyBins` requires **at least one** to resolve:
+  ```yaml
+  requires:
+    anyBins: ["obsidian-cli", "notesmd-cli"]
+  ```
+- Don't paper over real differences with weasel words. If a feature only works on one OS, say so in the body and link to an OS-specific alternative skill.
+
+If a tool genuinely behaves differently on Windows (different binary name, different command set, different auth flow), a separate `<tool>-windows` skill is acceptable — but the bar is "different enough that one set of docs would mislead users on the other OS," not "the install command differs."
+
 ## Skill Creation Process
 
 Skill creation involves these steps:
@@ -318,15 +364,17 @@ If you used `--examples`, delete any placeholder files that are not needed for t
 
 ##### Frontmatter
 
-Write the YAML frontmatter with `name` and `description`:
+Allowed top-level frontmatter keys: `name`, `description`, `license`, `allowed-tools`, `metadata`. No others.
 
 - `name`: The skill name
 - `description`: This is the primary triggering mechanism for your skill, and helps Codex understand when to use the skill.
   - Include both what the Skill does and specific triggers/contexts for when to use it.
   - Include all "when to use" information here - Not in the body. The body is only loaded after triggering, so "When to Use This Skill" sections in the body are not helpful to Codex.
   - Example description for a `docx` skill: "Comprehensive document creation, editing, and analysis with support for tracked changes, comments, formatting preservation, and text extraction. Use when Codex needs to work with professional documents (.docx files) for: (1) Creating new documents, (2) Modifying or editing content, (3) Working with tracked changes, (4) Adding comments, or any other document tasks"
+- `license` / `allowed-tools`: Optional. Use when the skill carries a license preamble or restricts the tools the agent should reach for.
+- `metadata.openclaw`: Optional OpenClaw extension surface. Keys: `emoji`, `os` (string array, e.g. `["darwin","linux","win32"]`), `requires` (with `bins` or `anyBins`), and `install` (an ordered array of install recipes; see "Cross-platform skills" earlier in this guide for the supported `kind:` values and `os:` gating).
 
-Do not include any other fields in YAML frontmatter.
+Do not invent additional top-level keys; the catalog validator rejects them.
 
 ##### Body
 
