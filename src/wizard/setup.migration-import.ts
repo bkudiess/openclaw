@@ -146,6 +146,10 @@ function resolveImportSourceDefault(params: {
   return params.providerId === "hermes" ? "~/.hermes" : "";
 }
 
+function migrationApplyProgressLabel(providerId: string): string {
+  return providerId === "codex" ? "Loading Codex plugins..." : "Applying migration...";
+}
+
 async function selectSetupMigrationProvider(params: {
   opts: OnboardOptions;
   baseConfig: OpenClawConfig;
@@ -300,7 +304,14 @@ export async function runSetupMigrationImport(params: {
     ...(backupPath ? { backupPath } : {}),
     reportDir,
   };
-  const result = await provider.apply(applyCtx, plan);
+  const result = await (async () => {
+    const progress = params.prompter.progress(migrationApplyProgressLabel(providerId));
+    try {
+      return await provider.apply(applyCtx, plan);
+    } finally {
+      progress.stop();
+    }
+  })();
   const withReport = {
     ...result,
     ...((result.backupPath ?? backupPath) ? { backupPath: result.backupPath ?? backupPath } : {}),

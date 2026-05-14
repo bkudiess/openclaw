@@ -53,6 +53,13 @@ import { resolveCodexMigrationTargets } from "./targets.js";
 const CODEX_PLUGIN_AUTH_REQUIRED_REASON = "auth_required";
 const CODEX_PLUGIN_NOT_SELECTED_REASON = "not selected for migration";
 const CODEX_CONFIG_PATCH_MODE_RETURN = "return";
+const CODEX_PLUGIN_MANUAL_REVIEW_REASON = "manual review";
+const CODEX_PLUGIN_LOAD_WARNING =
+  "Codex plugins could not be loaded. Run the Codex migration again after onboarding.";
+const TARGET_CODEX_MARKETPLACE_DISCOVERY_POLL_MS = 250;
+const TARGET_CODEX_MARKETPLACE_DISCOVERY_TIMEOUT_MS = 15_000;
+const TARGET_CODEX_MARKETPLACE_DISCOVERY_TIMEOUT_ENV =
+  "OPENCLAW_CODEX_MIGRATION_PLUGIN_LIST_TIMEOUT_MS";
 
 class CodexPluginConfigConflictError extends Error {
   constructor(readonly reason: string) {
@@ -102,6 +109,10 @@ export async function applyCodexMigrationPlan(params: {
     backupPath: params.ctx.backupPath,
     reportDir,
   };
+  if (items.some(isCodexPluginManualReviewItem)) {
+    result.warnings = [...new Set([...(result.warnings ?? []), CODEX_PLUGIN_LOAD_WARNING])];
+    result.nextSteps = [...new Set([CODEX_PLUGIN_LOAD_WARNING, ...(result.nextSteps ?? [])])];
+  }
   await writeMigrationReport(result, { title: "Codex Migration Report" });
   return result;
 }
@@ -124,7 +135,7 @@ async function applyCodexPluginInstallItem(
       identity: policy,
       installEvenIfActive: true,
       request: async (method, requestParams) =>
-        await requestCodexAppServerJson({
+        await requestTargetCodexAppServerJson({
           method,
           requestParams,
           timeoutMs: 60_000,
@@ -132,6 +143,7 @@ async function applyCodexPluginInstallItem(
           agentDir: resolveCodexMigrationTargets(ctx).agentDir,
           config: ctx.config,
           isolated: true,
+          logger: ctx.logger,
         }),
       appCache: defaultCodexAppInventoryCache,
       appCacheKey,
@@ -163,6 +175,20 @@ async function applyCodexPluginInstallItem(
         },
       };
     }
+    if (result.reason === "plugin_missing" || result.reason === "marketplace_missing") {
+      return {
+        ...item,
+        kind: "manual",
+        action: "manual",
+        status: "skipped",
+        reason: CODEX_PLUGIN_MANUAL_REVIEW_REASON,
+        message: `Codex plugin "${policy.pluginName}" could not be installed automatically because Codex plugins could not be loaded.`,
+        details: {
+          ...baseDetails,
+          manualReviewReason: CODEX_PLUGIN_LOAD_WARNING,
+        },
+      };
+    }
     return {
       ...item,
       status: "error",
@@ -186,6 +212,101 @@ function resolveTargetCodexAppServer(ctx: MigrationProviderContext) {
   return resolveCodexAppServerRuntimeOptions({
     pluginConfig: readCodexPluginConfig(ctx.config),
   });
+}
+
+async function requestTargetCodexAppServerJson(params: {
+  method: string;
+  requestParams?: unknown;
+  timeoutMs: number;
+  startOptions: ReturnType<typeof resolveTargetCodexAppServer>["start"];
+  agentDir: string;
+  config: MigrationProviderContext["config"];
+  isolated?: boolean;
+  logger?: MigrationProviderContext["logger"];
+}): Promise<unknown> {
+  if (params.method !== "plugin/list") {
+    return await requestCodexAppServerJson(params);
+  }
+
+  const deadline = Date.now() + params.timeoutMs;
+  const discoveryTimeoutMs = targetCodexMarketplaceDiscoveryTimeoutMs();
+  const discoveryDeadline = Math.min(deadline, Date.now() + discoveryTimeoutMs);
+  let lastResponse: unknown;
+  let attempt = 0;
+  do {
+    attempt += 1;
+    const remainingMs = Math.max(1, discoveryDeadline - Date.now());
+    params.logger?.warn(
+      `[codex-migration] plugin/list attempt ${attempt}: checking for openai-curated marketplace before installing Codex plugins.`,
+    );
+    lastResponse = await requestCodexAppServerJson({
+      ...params,
+      timeoutMs: remainingMs,
+    });
+    if (hasOpenAiCuratedMarketplace(lastResponse)) {
+      params.logger?.warn(
+        `[codex-migration] plugin/list attempt ${attempt}: openai-curated marketplace is available; continuing Codex plugin install.`,
+      );
+      return lastResponse;
+    }
+    if (Date.now() >= discoveryDeadline) {
+      params.logger?.warn(
+        `[codex-migration] openai-curated marketplace did not appear after ${attempt} plugin/list attempt(s) over ${discoveryTimeoutMs}ms; leaving Codex plugins for manual review.`,
+      );
+      return lastResponse;
+    }
+    const waitMs = Math.min(
+      TARGET_CODEX_MARKETPLACE_DISCOVERY_POLL_MS,
+      discoveryDeadline - Date.now(),
+    );
+    params.logger?.warn(
+      `[codex-migration] plugin/list attempt ${attempt}: openai-curated marketplace missing; retrying in ${waitMs}ms.`,
+    );
+    await sleep(waitMs);
+  } while (Date.now() < discoveryDeadline);
+
+  params.logger?.warn(
+    `[codex-migration] openai-curated marketplace did not appear before the discovery deadline; leaving Codex plugins for manual review.`,
+  );
+  return lastResponse;
+}
+
+function hasOpenAiCuratedMarketplace(response: unknown): boolean {
+  if (!response || typeof response !== "object" || !("marketplaces" in response)) {
+    return false;
+  }
+  const marketplaces = (response as { marketplaces?: unknown }).marketplaces;
+  return (
+    Array.isArray(marketplaces) &&
+    marketplaces.some(
+      (marketplace) =>
+        marketplace &&
+        typeof marketplace === "object" &&
+        (marketplace as { name?: unknown }).name === CODEX_PLUGINS_MARKETPLACE_NAME,
+    )
+  );
+}
+
+function targetCodexMarketplaceDiscoveryTimeoutMs(): number {
+  const configured = Number(process.env[TARGET_CODEX_MARKETPLACE_DISCOVERY_TIMEOUT_ENV]);
+  if (Number.isFinite(configured) && configured >= 0) {
+    return configured;
+  }
+  return TARGET_CODEX_MARKETPLACE_DISCOVERY_TIMEOUT_MS;
+}
+
+function isCodexPluginManualReviewItem(item: MigrationItem): boolean {
+  return (
+    item.kind === "manual" &&
+    item.action === "manual" &&
+    item.status === "skipped" &&
+    item.reason === CODEX_PLUGIN_MANUAL_REVIEW_REASON &&
+    item.details?.manualReviewReason === CODEX_PLUGIN_LOAD_WARNING
+  );
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function buildTargetCodexPluginAppCacheKey(ctx: MigrationProviderContext): Promise<string> {
