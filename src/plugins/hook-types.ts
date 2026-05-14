@@ -768,13 +768,15 @@ export type PluginHookBeforeInstallBuiltinScan = {
 
 export type PluginHookBeforeInstallSkillInstallSpec = {
   id?: string;
-  kind: "brew" | "node" | "go" | "uv" | "download";
+  kind: "brew" | "node" | "go" | "uv" | "download" | "winget" | "cargo";
   label?: string;
   bins?: string[];
   os?: string[];
   formula?: string;
   package?: string;
   module?: string;
+  crate?: string;
+  packageId?: string;
   url?: string;
   archive?: string;
   extract?: boolean;

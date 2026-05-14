@@ -389,3 +389,275 @@ describe("installSkill code safety scanning", () => {
     });
   });
 });
+
+describe("buildInstallCommand", () => {
+  const { buildInstallCommand } = skillsInstallTesting;
+  const prefs = { preferBrew: true, nodeManager: "npm" as const };
+
+  describe("winget kind", () => {
+    it("builds an unattended winget install command", () => {
+      const result = buildInstallCommand(
+        { kind: "winget", packageId: "Microsoft.PowerToys" },
+        prefs,
+      );
+      expect(result.argv).toEqual([
+        "winget",
+        "install",
+        "--id",
+        "Microsoft.PowerToys",
+        "--exact",
+        "--silent",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+      ]);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("accepts dotted publisher.name.tool ids", () => {
+      const result = buildInstallCommand(
+        { kind: "winget", packageId: "Microsoft.CLI.MicrosoftGraphCli" },
+        prefs,
+      );
+      expect(result.argv?.[3]).toBe("Microsoft.CLI.MicrosoftGraphCli");
+      expect(result.error).toBeUndefined();
+    });
+
+    it("accepts lowercase publisher ids and hyphens", () => {
+      const result = buildInstallCommand(
+        { kind: "winget", packageId: "aome510.spotify-player" },
+        prefs,
+      );
+      expect(result.argv?.[3]).toBe("aome510.spotify-player");
+      expect(result.error).toBeUndefined();
+    });
+
+    it("trims whitespace around packageId", () => {
+      const result = buildInstallCommand(
+        { kind: "winget", packageId: "  Microsoft.PowerToys  " },
+        prefs,
+      );
+      expect(result.argv?.[3]).toBe("Microsoft.PowerToys");
+    });
+
+    it("rejects missing packageId", () => {
+      const result = buildInstallCommand({ kind: "winget" }, prefs);
+      expect(result.argv).toBeNull();
+      expect(result.error).toBe("missing winget packageId");
+    });
+
+    it("rejects packageId without a publisher dot", () => {
+      const result = buildInstallCommand({ kind: "winget", packageId: "Notepad" }, prefs);
+      expect(result.argv).toBeNull();
+      expect(result.error).toContain("winget packageId");
+    });
+
+    it("rejects packageId with shell metacharacters", () => {
+      for (const malicious of [
+        "Microsoft.PowerToys;rm -rf /",
+        "Microsoft.PowerToys && evil.exe",
+        "Microsoft.PowerToys`whoami`",
+        "Microsoft.PowerToys$(whoami)",
+        "Microsoft.PowerToys|cat",
+      ]) {
+        const result = buildInstallCommand({ kind: "winget", packageId: malicious }, prefs);
+        expect(result.argv, `expected reject for ${malicious}`).toBeNull();
+        expect(result.error).toContain("winget packageId");
+      }
+    });
+
+    it("rejects packageId starting with a dash (would parse as flag)", () => {
+      const result = buildInstallCommand({ kind: "winget", packageId: "-malicious-flag" }, prefs);
+      expect(result.argv).toBeNull();
+      expect(result.error).toContain("starts with a dash");
+    });
+
+    it("rejects packageId with spaces", () => {
+      const result = buildInstallCommand(
+        { kind: "winget", packageId: "Microsoft PowerToys" },
+        prefs,
+      );
+      expect(result.argv).toBeNull();
+    });
+  });
+
+  describe("cargo kind", () => {
+    it("builds a cargo install command with --locked", () => {
+      const result = buildInstallCommand({ kind: "cargo", crate: "ripgrep" }, prefs);
+      expect(result.argv).toEqual(["cargo", "install", "--locked", "ripgrep"]);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("accepts crates with hyphens and underscores", () => {
+      const result = buildInstallCommand({ kind: "cargo", crate: "spotify_player" }, prefs);
+      expect(result.argv?.[3]).toBe("spotify_player");
+      expect(result.error).toBeUndefined();
+    });
+
+    it("splits @version into a --version flag", () => {
+      const result = buildInstallCommand({ kind: "cargo", crate: "ripgrep@13.0.0" }, prefs);
+      expect(result.argv).toEqual([
+        "cargo",
+        "install",
+        "--locked",
+        "ripgrep",
+        "--version",
+        "13.0.0",
+      ]);
+    });
+
+    it("rejects missing crate", () => {
+      const result = buildInstallCommand({ kind: "cargo" }, prefs);
+      expect(result.argv).toBeNull();
+      expect(result.error).toBe("missing cargo crate");
+    });
+
+    it("accepts uppercase crate names (real crates like Inflector exist on crates.io)", () => {
+      const result = buildInstallCommand({ kind: "cargo", crate: "Inflector" }, prefs);
+      expect(result.argv).toEqual(["cargo", "install", "--locked", "Inflector"]);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("accepts semver build-metadata versions (1.0.0+build.1)", () => {
+      const result = buildInstallCommand({ kind: "cargo", crate: "ripgrep@1.0.0+build.1" }, prefs);
+      expect(result.argv).toEqual([
+        "cargo",
+        "install",
+        "--locked",
+        "ripgrep",
+        "--version",
+        "1.0.0+build.1",
+      ]);
+    });
+
+    it("rejects crate names with shell metacharacters", () => {
+      for (const malicious of [
+        "ripgrep;rm",
+        "ripgrep && evil",
+        "ripgrep`whoami`",
+        "ripgrep|cat",
+        "ripgrep$(whoami)",
+        "../escape",
+      ]) {
+        const result = buildInstallCommand({ kind: "cargo", crate: malicious }, prefs);
+        expect(result.argv, `expected reject for ${malicious}`).toBeNull();
+      }
+    });
+
+    it("rejects crate name starting with a dash", () => {
+      const result = buildInstallCommand({ kind: "cargo", crate: "-injected" }, prefs);
+      expect(result.argv).toBeNull();
+      expect(result.error).toContain("starts with a dash");
+    });
+  });
+});
+
+describe("frontmatter parser end-to-end for new kinds", () => {
+  async function writeKindSkill(
+    workspaceDir: string,
+    name: string,
+    installEntry: string,
+  ): Promise<string> {
+    const skillDir = path.join(workspaceDir, "skills", name);
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      `---
+name: ${name}
+description: test skill
+metadata: {"openclaw":{"install":[${installEntry}]}}
+---
+
+# ${name}
+`,
+      "utf-8",
+    );
+    return skillDir;
+  }
+
+  it("loads a winget install spec all the way through the parser", async () => {
+    await withWorkspaceCase(async ({ workspaceDir }) => {
+      await writeKindSkill(
+        workspaceDir,
+        "winget-skill",
+        '{"id":"main","kind":"winget","packageId":"Microsoft.PowerToys","bins":["powertoys"]}',
+      );
+      const entries = loadTestWorkspaceSkillEntries(workspaceDir);
+      const entry = entries.find((e) => e.skill.name === "winget-skill");
+      expect(entry).toBeDefined();
+      const installs = entry?.metadata?.install ?? [];
+      expect(installs).toHaveLength(1);
+      expect(installs[0]).toMatchObject({
+        kind: "winget",
+        packageId: "Microsoft.PowerToys",
+      });
+    });
+  });
+
+  it("loads a cargo install spec all the way through the parser", async () => {
+    await withWorkspaceCase(async ({ workspaceDir }) => {
+      await writeKindSkill(
+        workspaceDir,
+        "cargo-skill",
+        '{"id":"main","kind":"cargo","crate":"ripgrep","bins":["rg"]}',
+      );
+      const entries = loadTestWorkspaceSkillEntries(workspaceDir);
+      const entry = entries.find((e) => e.skill.name === "cargo-skill");
+      expect(entry).toBeDefined();
+      const installs = entry?.metadata?.install ?? [];
+      expect(installs).toHaveLength(1);
+      expect(installs[0]).toMatchObject({ kind: "cargo", crate: "ripgrep" });
+    });
+  });
+
+  it("drops winget specs that lack packageId", async () => {
+    await withWorkspaceCase(async ({ workspaceDir }) => {
+      await writeKindSkill(
+        workspaceDir,
+        "broken-winget-skill",
+        '{"id":"main","kind":"winget","bins":["x"]}',
+      );
+      const entries = loadTestWorkspaceSkillEntries(workspaceDir);
+      const entry = entries.find((e) => e.skill.name === "broken-winget-skill");
+      expect(entry?.metadata?.install ?? []).toHaveLength(0);
+    });
+  });
+
+  it("drops cargo specs that lack crate", async () => {
+    await withWorkspaceCase(async ({ workspaceDir }) => {
+      await writeKindSkill(
+        workspaceDir,
+        "broken-cargo-skill",
+        '{"id":"main","kind":"cargo","bins":["x"]}',
+      );
+      const entries = loadTestWorkspaceSkillEntries(workspaceDir);
+      const entry = entries.find((e) => e.skill.name === "broken-cargo-skill");
+      expect(entry?.metadata?.install ?? []).toHaveLength(0);
+    });
+  });
+
+  it("drops winget specs with injection-shaped packageId", async () => {
+    await withWorkspaceCase(async ({ workspaceDir }) => {
+      await writeKindSkill(
+        workspaceDir,
+        "evil-winget-skill",
+        '{"id":"main","kind":"winget","packageId":"Microsoft.PowerToys;rm -rf /","bins":["x"]}',
+      );
+      const entries = loadTestWorkspaceSkillEntries(workspaceDir);
+      const entry = entries.find((e) => e.skill.name === "evil-winget-skill");
+      expect(entry?.metadata?.install ?? []).toHaveLength(0);
+    });
+  });
+
+  it("drops cargo specs with injection-shaped crate", async () => {
+    await withWorkspaceCase(async ({ workspaceDir }) => {
+      await writeKindSkill(
+        workspaceDir,
+        "evil-cargo-skill",
+        '{"id":"main","kind":"cargo","crate":"ripgrep;rm -rf /","bins":["rg"]}',
+      );
+      const entries = loadTestWorkspaceSkillEntries(workspaceDir);
+      const entry = entries.find((e) => e.skill.name === "evil-cargo-skill");
+      expect(entry?.metadata?.install ?? []).toHaveLength(0);
+    });
+  });
+});
