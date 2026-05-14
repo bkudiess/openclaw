@@ -89,6 +89,8 @@ function normalizeSkillInstallSpec(spec: SkillInstallSpec): SkillInstallSpecMeta
     ...(spec.formula ? { formula: spec.formula } : {}),
     ...(spec.package ? { package: spec.package } : {}),
     ...(spec.module ? { module: spec.module } : {}),
+    ...(spec.crate ? { crate: spec.crate } : {}),
+    ...(spec.packageId ? { packageId: spec.packageId } : {}),
     ...(spec.url ? { url: spec.url } : {}),
     ...(spec.archive ? { archive: spec.archive } : {}),
     ...(spec.extract !== undefined ? { extract: spec.extract } : {}),
@@ -147,6 +149,13 @@ const SAFE_NODE_PACKAGE = /^(@[a-z0-9._-]+\/)?[a-z0-9._-]+(@[a-z0-9^~>=<.*|-]+)?
 const SAFE_GO_MODULE = /^[a-zA-Z0-9][a-zA-Z0-9._/-]*@[a-z0-9v._-]+$/;
 const SAFE_UV_PACKAGE =
   /^[a-z0-9][a-z0-9._-]*(\[[a-z0-9,._-]+\])?(([><=!~]=?|===?)[a-z0-9.*_-]+)?$/i;
+// winget package IDs are dot-separated identifiers, e.g. "Microsoft.PowerToys", "Microsoft.CLI.MicrosoftGraphCli",
+// "aome510.spotify-player". Must contain at least one dot (winget IDs are always Publisher.Name).
+const SAFE_WINGET_PACKAGE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*(\.[a-zA-Z0-9][a-zA-Z0-9._-]*)+$/;
+// Cargo crate names allow ASCII letters (upper or lower), digits, `-`, `_`. Real crates with
+// uppercase names exist (e.g. `Inflector`). Optional `@version` pin; semver build metadata
+// (`1.0.0+build.1`) requires `+` to be allowed in the version segment.
+const SAFE_CARGO_CRATE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*(@[a-zA-Z0-9._+-]+)?$/;
 
 function assertSafeInstallerValue(value: string, kind: string, pattern: RegExp): string | null {
   const trimmed = value.trim();
@@ -208,6 +217,54 @@ function buildInstallCommand(
         return { argv: null, error: err };
       }
       return { argv: ["uv", "tool", "install", spec.package.trim()] };
+    }
+    case "winget": {
+      if (!spec.packageId) {
+        return { argv: null, error: "missing winget packageId" };
+      }
+      const err = assertSafeInstallerValue(
+        spec.packageId,
+        "winget packageId",
+        SAFE_WINGET_PACKAGE_ID,
+      );
+      if (err) {
+        return { argv: null, error: err };
+      }
+      // --silent + --accept-*-agreements lets the install run unattended; --exact pins to the
+      // resolved id so a partial-match collision can't redirect the install.
+      return {
+        argv: [
+          "winget",
+          "install",
+          "--id",
+          spec.packageId.trim(),
+          "--exact",
+          "--silent",
+          "--accept-source-agreements",
+          "--accept-package-agreements",
+        ],
+      };
+    }
+    case "cargo": {
+      if (!spec.crate) {
+        return { argv: null, error: "missing cargo crate" };
+      }
+      const err = assertSafeInstallerValue(spec.crate, "cargo crate", SAFE_CARGO_CRATE);
+      if (err) {
+        return { argv: null, error: err };
+      }
+      const trimmed = spec.crate.trim();
+      // The regex above guarantees at most one `@`. Use split(..., 2) defensively so that any
+      // future relaxation of the regex (e.g. allowing registry specifiers) doesn't silently
+      // drop trailing segments.
+      const atIndex = trimmed.indexOf("@");
+      const crateName = atIndex >= 0 ? trimmed.slice(0, atIndex) : trimmed;
+      const version = atIndex >= 0 ? trimmed.slice(atIndex + 1) : undefined;
+      const argv = ["cargo", "install", "--locked", crateName];
+      if (version) {
+        argv.push("--version", version);
+      }
+      return { argv };
     }
     case "download": {
       return { argv: null, error: "download install handled separately" };
@@ -569,6 +626,7 @@ export async function installSkill(params: SkillInstallRequest): Promise<SkillIn
 
 export const __testing = {
   resolveDefaultNodeInstallStateDir,
+  buildInstallCommand,
   setDepsForTest(overrides?: Partial<SkillsInstallDeps>): void {
     skillsInstallDeps = {
       ...defaultSkillsInstallDeps,

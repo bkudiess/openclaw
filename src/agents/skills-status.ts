@@ -82,21 +82,31 @@ function selectPreferredInstallSpec(
   const nodeSpec = findKind("node");
   const goSpec = findKind("go");
   const uvSpec = findKind("uv");
+  const wingetSpec = findKind("winget");
+  const cargoSpec = findKind("cargo");
   const downloadSpec = findKind("download");
   const brewAvailable = hasBinary("brew");
+  const wingetAvailable = hasBinary("winget");
+  const cargoAvailable = hasBinary("cargo");
 
   // Table-driven preference chain; first match wins.
   const pickers: Array<() => { spec: SkillInstallSpec; index: number } | undefined> = [
     () => (prefs.preferBrew && brewAvailable ? brewSpec : undefined),
+    // winget is the Windows-native counterpart to brew; prefer it when available before
+    // falling through to language-runtime installers on Windows boxes.
+    () => (wingetAvailable ? wingetSpec : undefined),
     () => uvSpec,
     () => nodeSpec,
     // Only prefer brew when available to avoid guaranteed failure on Linux/Docker.
     () => (brewAvailable ? brewSpec : undefined),
     () => goSpec,
-    // Prefer download over an unavailable brew spec.
+    () => (cargoAvailable ? cargoSpec : undefined),
+    // Prefer download over an unavailable brew/winget spec.
     () => downloadSpec,
-    // Last resort: surface descriptive brew-missing error instead of "no installer found".
+    // Last resort: surface descriptive missing-installer error instead of "no installer found".
     () => brewSpec,
+    () => wingetSpec,
+    () => cargoSpec,
     () => indexed[0],
   ];
 
@@ -151,6 +161,10 @@ function normalizeInstallOptions(
         label = `Install ${spec.module} (go)`;
       } else if (spec.kind === "uv" && spec.package) {
         label = `Install ${spec.package} (uv)`;
+      } else if (spec.kind === "winget" && spec.packageId) {
+        label = `Install ${spec.packageId} (winget)`;
+      } else if (spec.kind === "cargo" && spec.crate) {
+        label = `Install ${spec.crate} (cargo)`;
       } else if (spec.kind === "download" && spec.url) {
         const url = spec.url.trim();
         const last = url.split("/").pop();

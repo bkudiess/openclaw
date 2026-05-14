@@ -28,6 +28,10 @@ export function parseFrontmatter(content: string): ParsedSkillFrontmatter {
 const BREW_FORMULA_PATTERN = /^[A-Za-z0-9][A-Za-z0-9@+._/-]*$/;
 const GO_MODULE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~+\-/]*(?:@[A-Za-z0-9][A-Za-z0-9._~+\-/]*)?$/;
 const UV_PACKAGE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-[\]=<>!~+,]*$/;
+const WINGET_PACKAGE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*(\.[a-zA-Z0-9][a-zA-Z0-9._-]*)+$/;
+// Cargo crate names allow ASCII letters (upper or lower), digits, `-`, `_`. Real crates with
+// uppercase names exist on crates.io (e.g. `Inflector`). Optional `@version` pin.
+const CARGO_CRATE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*(@[A-Za-z0-9._+-]+)?$/;
 
 function normalizeSafeBrewFormula(raw: unknown): string | undefined {
   if (typeof raw !== "string") {
@@ -109,8 +113,44 @@ function normalizeSafeDownloadUrl(raw: unknown): string | undefined {
   }
 }
 
+function normalizeSafeWingetPackageId(raw: unknown): string | undefined {
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const value = raw.trim();
+  if (!value || value.startsWith("-") || value.includes("\\") || value.includes("://")) {
+    return undefined;
+  }
+  if (!WINGET_PACKAGE_ID_PATTERN.test(value)) {
+    return undefined;
+  }
+  return value;
+}
+
+function normalizeSafeCargoCrate(raw: unknown): string | undefined {
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const value = raw.trim();
+  if (!value || value.startsWith("-") || value.includes("\\") || value.includes("://")) {
+    return undefined;
+  }
+  if (!CARGO_CRATE_PATTERN.test(value)) {
+    return undefined;
+  }
+  return value;
+}
+
 function parseInstallSpec(input: unknown): SkillInstallSpec | undefined {
-  const parsed = parseOpenClawManifestInstallBase(input, ["brew", "node", "go", "uv", "download"]);
+  const parsed = parseOpenClawManifestInstallBase(input, [
+    "brew",
+    "node",
+    "go",
+    "uv",
+    "download",
+    "winget",
+    "cargo",
+  ]);
   if (!parsed) {
     return undefined;
   }
@@ -148,6 +188,18 @@ function parseInstallSpec(input: unknown): SkillInstallSpec | undefined {
   if (moduleSpec) {
     spec.module = moduleSpec;
   }
+  if (spec.kind === "winget") {
+    const packageId = normalizeSafeWingetPackageId(raw.packageId);
+    if (packageId) {
+      spec.packageId = packageId;
+    }
+  }
+  if (spec.kind === "cargo") {
+    const crate = normalizeSafeCargoCrate(raw.crate);
+    if (crate) {
+      spec.crate = crate;
+    }
+  }
   const downloadUrl = normalizeSafeDownloadUrl(raw.url);
   if (downloadUrl) {
     spec.url = downloadUrl;
@@ -175,6 +227,12 @@ function parseInstallSpec(input: unknown): SkillInstallSpec | undefined {
     return undefined;
   }
   if (spec.kind === "uv" && !spec.package) {
+    return undefined;
+  }
+  if (spec.kind === "winget" && !spec.packageId) {
+    return undefined;
+  }
+  if (spec.kind === "cargo" && !spec.crate) {
     return undefined;
   }
   if (spec.kind === "download" && !spec.url) {
